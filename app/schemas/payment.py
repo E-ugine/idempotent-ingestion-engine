@@ -17,13 +17,7 @@ class PaymentCreateRequest(BaseModel):
     amount: Decimal = Field(..., gt=0)
     currency: str = Field(..., min_length=3, max_length=3)
     payment_method: PaymentMethod
-    # A structured identifier (e.g. an order ID) -- not freeform text.
-    reference: str = Field(
-        ...,
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
-    )
+    reference: str = Field(..., max_length=128)
 
     # account_id is intentionally absent: it is derived server-side from the
     # auth dependency, never accepted from the client.
@@ -35,6 +29,14 @@ class PaymentCreateRequest(BaseModel):
         if pycountry.currencies.get(alpha_3=normalized) is None:
             raise ValueError(f"'{value}' is not a valid ISO 4217 currency code.")
         return normalized
+
+    @field_validator("reference")
+    @classmethod
+    def validate_reference_non_empty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("reference must not be empty or whitespace-only.")
+        return stripped
 
 
 class PaymentResponse(BaseModel):
