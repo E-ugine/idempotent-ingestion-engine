@@ -1,6 +1,7 @@
 import hashlib
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, text
@@ -16,6 +17,36 @@ _LOCK_WAIT_TIMEOUT_SECONDS = 10
 _UNIQUE_VIOLATION = "23505"
 _LOCK_NOT_AVAILABLE = "55P03"
 
+# pycountry's Currency object doesn't expose ISO 4217 minor-unit precision
+# (only alpha_3/name/numeric), so it's hardcoded here. This is the standard,
+# short, and stable set of exceptions to the "2 decimal places" default.
+_ZERO_DECIMAL_CURRENCIES = frozenset(
+    {
+        "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG",
+        "RWF", "UGX", "UYI", "VND", "VUV", "XAF", "XOF", "XPF",
+    }
+)
+_THREE_DECIMAL_CURRENCIES = frozenset({"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"})
+_DEFAULT_CURRENCY_DECIMAL_PLACES = 2
+
+
+def _currency_decimal_places(currency: str) -> int:
+    if currency in _ZERO_DECIMAL_CURRENCIES:
+        return 0
+    if currency in _THREE_DECIMAL_CURRENCIES:
+        return 3
+    return _DEFAULT_CURRENCY_DECIMAL_PLACES
+
+
+def _quantize_amount_for_fingerprint(amount: Decimal, currency: str) -> Decimal:
+    """
+    Fingerprint-only normalization: Decimal("10.00") and Decimal("10.0")
+    must hash identically for the same currency. Does not affect the amount
+    actually charged/stored -- callers keep using payload.amount as-is.
+    """
+    exponent = Decimal(1).scaleb(-_currency_decimal_places(currency))
+    return amount.quantize(exponent, rounding=ROUND_HALF_UP)
+
 
 class IdempotencyConflictError(Exception):
     """Raised for any case the caller should surface as HTTP 409."""
@@ -27,10 +58,11 @@ class IdempotencyConflictError(Exception):
 
 
 def _compute_request_fingerprint(account_id: str, payload: PaymentCreateRequest) -> str:
+    quantized_amount = _quantize_amount_for_fingerprint(payload.amount, payload.currency)
     canonical = "|".join(
         [
             account_id,
-            str(payload.amount),
+            str(quantized_amount),
             payload.currency,
             payload.payment_method.value,
             payload.reference,
