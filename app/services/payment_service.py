@@ -17,6 +17,13 @@ _LOCK_WAIT_TIMEOUT_SECONDS = 10
 _UNIQUE_VIOLATION = "23505"
 _LOCK_NOT_AVAILABLE = "55P03"
 
+# How long a "processing" row is trusted before being treated as abandoned
+# (e.g. the owning request crashed after its first commit but before its
+# second, leaving no lock held on the row). This will need to grow once this
+# integrates with a real PSP, where network latency alone could approach or
+# exceed today's value.
+_STALE_PROCESSING_THRESHOLD_SECONDS = 30
+
 # pycountry's Currency object doesn't expose ISO 4217 minor-unit precision
 # (only alpha_3/name/numeric), so it's hardcoded here. This is the standard,
 # short, and stable set of exceptions to the "2 decimal places" default.
@@ -99,6 +106,14 @@ def _wait_for_existing_result(
     The row is committed with status="processing" but the owning request
     hasn't finished yet. Block on its row lock (bounded) instead of polling;
     once it's released, the owning request has committed its final result.
+
+    Because the row is committed *before* the charge is simulated (see
+    process_payment), no lock is actually held on it between that commit and
+    the completion commit -- so if the owning request crashes in that gap,
+    this SELECT ... FOR UPDATE returns immediately instead of blocking, on a
+    row that will never be completed. The staleness check below is what
+    catches that case, rather than trusting "I got the lock" to mean "the
+    owner is done."
     """
     try:
         db.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_WAIT_TIMEOUT_SECONDS}s'"))
@@ -110,6 +125,16 @@ def _wait_for_existing_result(
             )
             .with_for_update()
         ).scalar_one()
+
+        if row.status == "processing":
+            age_seconds = (datetime.now(timezone.utc) - row.updated_at).total_seconds()
+            if age_seconds >= _STALE_PROCESSING_THRESHOLD_SECONDS:
+                db.rollback()
+                raise IdempotencyConflictError(
+                    "The original request with this idempotency key appears to have "
+                    "failed or stalled. Please retry with a new idempotency key."
+                )
+
         status_code, response_body = row.response_status_code, row.response_body
         db.commit()
     except OperationalError as exc:
@@ -177,10 +202,10 @@ def process_payment(
             return existing.response_status_code, existing.response_body
 
         if existing.status == "processing":
-            # TODO: expiry-based handling -- whether a stale "processing" row
-            # (e.g. the original request's process died) should eventually be
-            # treated as abandoned and reprocessed is an open design decision,
-            # not implemented here.
+            # A stale "processing" row (see _wait_for_existing_result) is
+            # rejected, never silently reprocessed as a fresh charge -- the
+            # original attempt may have already succeeded downstream before
+            # crashing, and reprocessing risks a double charge.
             return _wait_for_existing_result(db, account_id, idempotency_key)
 
         raise RuntimeError(f"Unexpected idempotency key status: {existing.status!r}")
