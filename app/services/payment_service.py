@@ -1,11 +1,12 @@
 import hashlib
 import logging
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models.idempotency_key import IdempotencyKey
@@ -13,16 +14,16 @@ from app.schemas.payment import PaymentCreateRequest, PaymentResponse
 
 logger = logging.getLogger(__name__)
 
-_LOCK_WAIT_TIMEOUT_SECONDS = 10
 _UNIQUE_VIOLATION = "23505"
-_LOCK_NOT_AVAILABLE = "55P03"
 
 # How long a "processing" row is trusted before being treated as abandoned
-# (e.g. the owning request crashed after its first commit but before its
-# second, leaving no lock held on the row). This will need to grow once this
-# integrates with a real PSP, where network latency alone could approach or
-# exceed today's value.
+# (e.g. the owning request crashed, or its PSP call never returned) --
+# reused as both the immediate-check threshold and the polling loop's
+# give-up deadline below. This will need to grow once this integrates with
+# a real PSP, where network latency alone could approach or exceed today's
+# value.
 _STALE_PROCESSING_THRESHOLD_SECONDS = 30
+_POLL_INTERVAL_SECONDS = 0.15
 
 # pycountry's Currency object doesn't expose ISO 4217 minor-unit precision
 # (only alpha_3/name/numeric), so it's hardcoded here. This is the standard,
@@ -95,8 +96,23 @@ def _is_unique_violation(exc: IntegrityError) -> bool:
     return getattr(exc.orig, "sqlstate", None) == _UNIQUE_VIOLATION
 
 
-def _is_lock_timeout(exc: OperationalError) -> bool:
-    return getattr(exc.orig, "sqlstate", None) == _LOCK_NOT_AVAILABLE
+def _is_row_stale(updated_at: datetime) -> bool:
+    """
+    Single source of truth for "how long is too long": derived from the
+    row's own updated_at, not from how long any particular caller has been
+    waiting -- so a request that arrives late to an already long-stalled
+    row recognizes it as stale immediately, rather than getting a fresh
+    grace period.
+    """
+    age_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
+    return age_seconds >= _STALE_PROCESSING_THRESHOLD_SECONDS
+
+
+def _raise_stale_processing_conflict() -> None:
+    raise IdempotencyConflictError(
+        "The original request with this idempotency key appears to have "
+        "failed or stalled. Please retry with a new idempotency key."
+    )
 
 
 def _wait_for_existing_result(
@@ -104,50 +120,40 @@ def _wait_for_existing_result(
 ) -> tuple[int, dict]:
     """
     The row is committed with status="processing" but the owning request
-    hasn't finished yet. Block on its row lock (bounded) instead of polling;
-    once it's released, the owning request has committed its final result.
-
-    Because the row is committed *before* the charge is simulated (see
-    process_payment), no lock is actually held on it between that commit and
-    the completion commit -- so if the owning request crashes in that gap,
-    this SELECT ... FOR UPDATE returns immediately instead of blocking, on a
-    row that will never be completed. The staleness check below is what
-    catches that case, rather than trusting "I got the lock" to mean "the
-    owner is done."
+    hasn't finished yet. The two-commit design in process_payment
+    deliberately releases the row's lock right after the first commit -- so
+    a slow PSP call doesn't hold a DB connection/lock hostage for its
+    entire duration -- which means there is no lock left to block on here.
+    A concurrent SELECT ... FOR UPDATE would return immediately on a
+    perfectly healthy in-flight row, not wait for it. Poll for completion
+    instead, using the row's own updated_at (via _is_row_stale) as the
+    give-up condition on every iteration.
     """
-    try:
-        db.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_WAIT_TIMEOUT_SECONDS}s'"))
+    key_str = str(idempotency_key)
+
+    while True:
+        # db.commit() here (vs. expire_all()) does two jobs at once: it
+        # expires cached attributes so the re-SELECT below actually hits the
+        # DB instead of returning an already-loaded value from the identity
+        # map, AND it closes out the transaction opened by the previous
+        # SELECT so this session isn't sitting idle-in-transaction on a
+        # checked-out connection for the whole (up to 30s) polling window.
+        # expire_all() alone would only do the former.
+        db.commit()
         row = db.execute(
-            select(IdempotencyKey)
-            .where(
+            select(IdempotencyKey).where(
                 IdempotencyKey.account_id == account_id,
-                IdempotencyKey.idempotency_key == str(idempotency_key),
+                IdempotencyKey.idempotency_key == key_str,
             )
-            .with_for_update()
         ).scalar_one()
 
-        if row.status == "processing":
-            age_seconds = (datetime.now(timezone.utc) - row.updated_at).total_seconds()
-            if age_seconds >= _STALE_PROCESSING_THRESHOLD_SECONDS:
-                db.rollback()
-                raise IdempotencyConflictError(
-                    "The original request with this idempotency key appears to have "
-                    "failed or stalled. Please retry with a new idempotency key."
-                )
+        if row.status == "completed":
+            return row.response_status_code, row.response_body
 
-        status_code, response_body = row.response_status_code, row.response_body
-        db.commit()
-    except OperationalError as exc:
-        db.rollback()
-        if _is_lock_timeout(exc):
-            raise IdempotencyConflictError(
-                "A request with this idempotency key is already being processed. "
-                "Please retry shortly.",
-                retry_after=5,
-            ) from exc
-        raise
+        if _is_row_stale(row.updated_at):
+            _raise_stale_processing_conflict()
 
-    return status_code, response_body
+        time.sleep(_POLL_INTERVAL_SECONDS)
 
 
 def process_payment(
@@ -171,8 +177,8 @@ def process_payment(
         # This insert (and its immediate commit) IS the atomicity guard --
         # no existence check beforehand. Committing now, before the charge is
         # simulated, is what makes the "processing" row visible to a
-        # concurrent duplicate so it can lock and wait on it below, rather
-        # than racing an in-flight transaction it can't yet see.
+        # concurrent duplicate so it can poll against it below, rather than
+        # racing an in-flight transaction it can't yet see.
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -202,10 +208,14 @@ def process_payment(
             return existing.response_status_code, existing.response_body
 
         if existing.status == "processing":
-            # A stale "processing" row (see _wait_for_existing_result) is
-            # rejected, never silently reprocessed as a fresh charge -- the
-            # original attempt may have already succeeded downstream before
-            # crashing, and reprocessing risks a double charge.
+            # A stale "processing" row is rejected outright here, never
+            # silently reprocessed as a fresh charge -- the original attempt
+            # may have already succeeded downstream before crashing, and
+            # reprocessing risks a double charge. Not-yet-stale rows fall
+            # through to polling, which re-applies this same staleness check
+            # (via _is_row_stale) on every iteration.
+            if _is_row_stale(existing.updated_at):
+                _raise_stale_processing_conflict()
             return _wait_for_existing_result(db, account_id, idempotency_key)
 
         raise RuntimeError(f"Unexpected idempotency key status: {existing.status!r}")
