@@ -59,9 +59,8 @@ def _quantize_amount_for_fingerprint(amount: Decimal, currency: str) -> Decimal:
 class IdempotencyConflictError(Exception):
     """Raised for any case the caller should surface as HTTP 409."""
 
-    def __init__(self, detail: str, retry_after: int | None = None):
+    def __init__(self, detail: str):
         self.detail = detail
-        self.retry_after = retry_after
         super().__init__(detail)
 
 

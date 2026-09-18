@@ -25,12 +25,7 @@ def create_payment(
     try:
         status_code, response_body = process_payment(db, account_id, idempotency_key, payment)
     except IdempotencyConflictError as exc:
-        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=exc.detail,
-            headers=headers,
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
 
     response.status_code = status_code
     return response_body
