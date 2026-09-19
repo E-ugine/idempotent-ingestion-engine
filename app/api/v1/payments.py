@@ -10,11 +10,7 @@ from app.services.payment_service import IdempotencyConflictError, process_payme
 router = APIRouter()
 
 
-@router.post(
-    "/payments",
-    response_model=PaymentResponse,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/payments",response_model=PaymentResponse,status_code=status.HTTP_201_CREATED,)
 def create_payment(
     payment: PaymentCreateRequest,
     response: Response,

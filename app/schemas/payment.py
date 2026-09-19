@@ -19,8 +19,6 @@ class PaymentCreateRequest(BaseModel):
     payment_method: PaymentMethod
     reference: str = Field(..., max_length=128)
 
-    # account_id is intentionally absent: it is derived server-side from the
-    # auth dependency, never accepted from the client.
 
     @field_validator("currency")
     @classmethod

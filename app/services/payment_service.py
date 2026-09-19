@@ -16,17 +16,16 @@ logger = logging.getLogger(__name__)
 
 _UNIQUE_VIOLATION = "23505"
 
-# How long a "processing" row is trusted before being treated as abandoned
-# (e.g. the owning request crashed, or its PSP call never returned) --
-# reused as both the immediate-check threshold and the polling loop's
-# give-up deadline below. This will need to grow once this integrates with
-# a real PSP, where network latency alone could approach or exceed today's
-# value.
+# How long a "processing" row is trusted before being treated as abandoned.
+# For instancethe, owning request crashed, or its PSP call never returned.
+# This will need to grow once this integrates with
+# a real PSP, where network latency alone could approach or exceed today's value
+
 _STALE_PROCESSING_THRESHOLD_SECONDS = 30
 _POLL_INTERVAL_SECONDS = 0.15
 
 # pycountry's Currency object doesn't expose ISO 4217 minor-unit precision
-# (only alpha_3/name/numeric), so it's hardcoded here. This is the standard,
+# Only alpha_3/name/numeric, so it's hardcoded here. This is the standard,
 # short, and stable set of exceptions to the "2 decimal places" default.
 _ZERO_DECIMAL_CURRENCIES = frozenset(
     {
@@ -47,18 +46,14 @@ def _currency_decimal_places(currency: str) -> int:
 
 
 def _quantize_amount_for_fingerprint(amount: Decimal, currency: str) -> Decimal:
-    """
-    Fingerprint-only normalization: Decimal("10.00") and Decimal("10.0")
-    must hash identically for the same currency. Does not affect the amount
-    actually charged/stored -- callers keep using payload.amount as-is.
-    """
+    # Fingerprint-only normalization: Decimal("10.00") and Decimal("10.0")
+    # must hash identically for the same currency. 
+  
     exponent = Decimal(1).scaleb(-_currency_decimal_places(currency))
     return amount.quantize(exponent, rounding=ROUND_HALF_UP)
 
 
 class IdempotencyConflictError(Exception):
-    """Raised for any case the caller should surface as HTTP 409."""
-
     def __init__(self, detail: str):
         self.detail = detail
         super().__init__(detail)
@@ -79,7 +74,7 @@ def _compute_request_fingerprint(account_id: str, payload: PaymentCreateRequest)
 
 
 def _simulate_charge(payload: PaymentCreateRequest) -> tuple[int, dict]:
-    """Stands in for a real PSP call. Out of scope for this project: always succeeds instantly."""
+    # Stands in for a real PSP call.
     response = PaymentResponse(
         payment_id=uuid4(),
         status="completed",
