@@ -25,8 +25,7 @@ _STALE_PROCESSING_THRESHOLD_SECONDS = 30
 _POLL_INTERVAL_SECONDS = 0.15
 
 # pycountry's Currency object doesn't expose ISO 4217 minor-unit precision
-# Only alpha_3/name/numeric, so it's hardcoded here. This is the standard,
-# short, and stable set of exceptions to the "2 decimal places" default.
+# Only alpha_3/name/numeric, so it's hardcoded here. 
 _ZERO_DECIMAL_CURRENCIES = frozenset(
     {
         "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG",
@@ -91,13 +90,7 @@ def _is_unique_violation(exc: IntegrityError) -> bool:
 
 
 def _is_row_stale(updated_at: datetime) -> bool:
-    """
-    Single source of truth for "how long is too long": derived from the
-    row's own updated_at, not from how long any particular caller has been
-    waiting -- so a request that arrives late to an already long-stalled
-    row recognizes it as stale immediately, rather than getting a fresh
-    grace period.
-    """
+
     age_seconds = (datetime.now(timezone.utc) - updated_at).total_seconds()
     return age_seconds >= _STALE_PROCESSING_THRESHOLD_SECONDS
 
@@ -112,27 +105,10 @@ def _raise_stale_processing_conflict() -> None:
 def _wait_for_existing_result(
     db: Session, account_id: str, idempotency_key: UUID
 ) -> tuple[int, dict]:
-    """
-    The row is committed with status="processing" but the owning request
-    hasn't finished yet. The two-commit design in process_payment
-    deliberately releases the row's lock right after the first commit -- so
-    a slow PSP call doesn't hold a DB connection/lock hostage for its
-    entire duration -- which means there is no lock left to block on here.
-    A concurrent SELECT ... FOR UPDATE would return immediately on a
-    perfectly healthy in-flight row, not wait for it. Poll for completion
-    instead, using the row's own updated_at (via _is_row_stale) as the
-    give-up condition on every iteration.
-    """
+
     key_str = str(idempotency_key)
 
     while True:
-        # db.commit() here (vs. expire_all()) does two jobs at once: it
-        # expires cached attributes so the re-SELECT below actually hits the
-        # DB instead of returning an already-loaded value from the identity
-        # map, AND it closes out the transaction opened by the previous
-        # SELECT so this session isn't sitting idle-in-transaction on a
-        # checked-out connection for the whole (up to 30s) polling window.
-        # expire_all() alone would only do the former.
         db.commit()
         row = db.execute(
             select(IdempotencyKey).where(
@@ -168,11 +144,6 @@ def process_payment(
     db.add(new_row)
 
     try:
-        # This insert (and its immediate commit) IS the atomicity guard --
-        # no existence check beforehand. Committing now, before the charge is
-        # simulated, is what makes the "processing" row visible to a
-        # concurrent duplicate so it can poll against it below, rather than
-        # racing an in-flight transaction it can't yet see.
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -202,20 +173,13 @@ def process_payment(
             return existing.response_status_code, existing.response_body
 
         if existing.status == "processing":
-            # A stale "processing" row is rejected outright here, never
-            # silently reprocessed as a fresh charge -- the original attempt
-            # may have already succeeded downstream before crashing, and
-            # reprocessing risks a double charge. Not-yet-stale rows fall
-            # through to polling, which re-applies this same staleness check
-            # (via _is_row_stale) on every iteration.
+
             if _is_row_stale(existing.updated_at):
                 _raise_stale_processing_conflict()
             return _wait_for_existing_result(db, account_id, idempotency_key)
 
         raise RuntimeError(f"Unexpected idempotency key status: {existing.status!r}")
 
-    # Insert succeeded -- this request owns the key. Simulate the charge and
-    # persist the outcome as a second commit.
     status_code, response_body = _simulate_charge(payload)
     new_row.status = "completed"
     new_row.response_status_code = status_code
