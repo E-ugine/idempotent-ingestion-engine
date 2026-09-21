@@ -47,6 +47,8 @@ flowchart TD
 
 `account_id` is derived server-side from the auth token at the "Route & validation" stage. It is never accepted from the client, anywhere in the request.
 
+<img src="docs/images/idempotent-ingestion-engine-story.svg" alt="Request lifecycle diagram" width="900">
+
 ## Tech stack
 
 - **FastAPI** — HTTP layer, request validation
