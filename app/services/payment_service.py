@@ -16,16 +16,11 @@ logger = logging.getLogger(__name__)
 
 _UNIQUE_VIOLATION = "23505"
 
-# How long a "processing" row is trusted before being treated as abandoned.
-# For instancethe, owning request crashed, or its PSP call never returned.
-# This will need to grow once this integrates with
-# a real PSP, where network latency alone could approach or exceed today's value
-
+# The duplicate request polls for 30 seconds before it's considered stale.
 _STALE_PROCESSING_THRESHOLD_SECONDS = 30
-_POLL_INTERVAL_SECONDS = 0.15
+_POLL_INTERVAL_SECONDS = 0.15 
 
-# pycountry's Currency object doesn't expose ISO 4217 minor-unit precision
-# Only alpha_3/name/numeric, so it's hardcoded here. 
+
 _ZERO_DECIMAL_CURRENCIES = frozenset(
     {
         "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG",
