@@ -168,7 +168,8 @@ def process_payment(
             return existing.response_status_code, existing.response_body
 
         if existing.status == "processing":
-
+  # Check before polling and the polling loop sharing one function ensures that the two places always agree to a common meaning of 'stale' 
+  # and the duplicate doesn't enter the wait.
             if _is_row_stale(existing.updated_at):
                 _raise_stale_processing_conflict()
             return _wait_for_existing_result(db, account_id, idempotency_key)
