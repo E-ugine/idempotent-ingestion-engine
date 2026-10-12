@@ -32,6 +32,9 @@ Most idempotency implementations stop at "check if a key exists before processin
 - **A request that's still legitimately in-flight** : a concurrent duplicate arriving while the original request is actively being processed (e.g. mid-PSP-call), which should wait for the real result rather than error or double-process.
 - **An orphaned request** : the server crashes between accepting a charge and finishing it, leaving a stuck record that must eventually be recognized as abandoned, not polled forever or silently reprocessed (which would risk a double charge).
 
+
+For a real production system, a scheduled cleanup would be a architecturally correct approach to handle staleness check but it requires a scheduler that this project doesn't have yet. The scheduler itself can silently fail in the event of a crash. So for now the inline check solves the correctness problem with  no additional infrastructure required. The inline check though only runs when a duplicate arrives which means for a stuck row, it remains stuck forever.. With a real PSP, the threshold has to grow to accommodate scenarios where network latency approaches/exceeds our current limit. Where the threshold is too low, the duplicate will be instructed to reprocess with a new key which would lead to double charge. When the threshold is too high, the system is safe but slow to recover. Retries with the same key wait instead of failing fast and the client sits in limbo. Each waiting request ties up resources.
+
 Every one of these was found, reasoned through, and fixed during development, several as real bugs caught during design review, not hypothetical edge cases. See [Bugs found and fixed](#bugs-found-and-fixed-during-development) below.
 
 ## Architecture
