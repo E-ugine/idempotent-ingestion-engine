@@ -9,8 +9,7 @@ from app.db.base import SessionLocal
 
 bearer_scheme = HTTPBearer()
 
-# account_id has no local FK to validate against (it's owned by an external
-# service), so this is a shape check only: non-empty, opaque identifier.
+
 _ACCOUNT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 

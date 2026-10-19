@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _UNIQUE_VIOLATION = "23505"
 
-# The duplicate request polls for 30 seconds before it's considered stale.
+
 _STALE_PROCESSING_THRESHOLD_SECONDS = 30
 _POLL_INTERVAL_SECONDS = 0.15 
 
@@ -68,7 +68,7 @@ def _compute_request_fingerprint(account_id: str, payload: PaymentCreateRequest)
 
 
 def _simulate_charge(payload: PaymentCreateRequest) -> tuple[int, dict]:
-    # Stands in for a real PSP call.
+
     response = PaymentResponse(
         payment_id=uuid4(),
         status="completed",
